@@ -146,6 +146,8 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_ISR_PT			BIT(1)
 /* PR - Packet Received */
 #define DM9051_ISR_PR			BIT(0)
+/* Interrupt sources enabled in IMR */
+#define DM9051_ISR_EVENTS		(DM9051_ISR_LNKCHG | DM9051_ISR_PT | DM9051_ISR_PR)
 
 /* 0x7F */
 /* PAR - Pointer Auto-Return Mode */
@@ -173,6 +175,8 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_NSR_POLL_TIMEOUT		K_USEC(20)
 /* Delay between NSR status polls */
 #define DM9051_NSR_POLL_INTERVAL	K_USEC(1)
+/* Max time the RX thread waits for an INT edge before checking the line */
+#define DM9051_INT_POLL_PERIOD		K_SECONDS(1)
 
 struct eth_dm9051_config {
 	struct net_eth_mac_config mac_cfg;
@@ -670,19 +674,35 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
+	const struct eth_dm9051_config *config;
 	struct eth_dm9051_data *data;
 	struct device *dev;
 	uint8_t isr = 0;
 	int ret;
 
 	dev = p1;
+	config = dev->config;
 	data = dev->data;
 
 	while (true) {
-		k_sem_take(&data->int_event, K_FOREVER);
+		/*
+		 * The interrupt is edge triggered but the line follows ISR, so an
+		 * event latched between reading ISR and writing it back keeps the
+		 * line asserted without a new edge. Service ISR again instead of waiting for one,
+		 * and bound the wait so that a line left asserted by a failed ISR
+		 * access is still serviced.
+		 */
+		if (((isr & DM9051_ISR_EVENTS) == 0U) ||
+		    (gpio_pin_get_dt(&config->gpio_int) <= 0)) {
+			ret = k_sem_take(&data->int_event, DM9051_INT_POLL_PERIOD);
+			if ((ret != 0) && (gpio_pin_get_dt(&config->gpio_int) <= 0)) {
+				continue;
+			}
+		}
 
 		ret = eth_dm9051_spi_read_reg(dev, DM9051_ISR, &isr);
 		if (ret < 0) {
+			isr = 0;
 			LOG_ERR("%s: Failed to read ISR (err %d)", dev->name, ret);
 			eth_stats_update_errors_rx(data->iface);
 			continue;
@@ -690,6 +710,7 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 
 		ret = eth_dm9051_spi_write_reg(dev, DM9051_ISR, isr);
 		if (ret < 0) {
+			isr = 0;
 			LOG_ERR("%s: Failed to write ISR (err %d)", dev->name, ret);
 			eth_stats_update_errors_rx(data->iface);
 			continue;
