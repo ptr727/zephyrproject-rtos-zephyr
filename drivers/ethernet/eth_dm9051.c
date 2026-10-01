@@ -695,7 +695,8 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 		if (((isr & DM9051_ISR_EVENTS) == 0U) ||
 		    (gpio_pin_get_dt(&config->gpio_int) <= 0)) {
 			ret = k_sem_take(&data->int_event, DM9051_INT_POLL_PERIOD);
-			if ((ret != 0) && (gpio_pin_get_dt(&config->gpio_int) <= 0)) {
+			/* A failed line read services ISR rather than waiting again */
+			if ((ret != 0) && (gpio_pin_get_dt(&config->gpio_int) == 0)) {
 				continue;
 			}
 		}
