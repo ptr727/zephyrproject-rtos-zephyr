@@ -39,6 +39,9 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 /* DM9051 Product ID */
 #define DM9051_ID			0x9051
 
+/* CH390 Product ID */
+#define CH390_ID			0x9151U
+
 /* DM9051 PHY Address */
 #define DM9051_PHY_ADDR			1
 
@@ -196,6 +199,7 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 struct eth_dm9051_config {
 	struct net_eth_mac_config mac_cfg;
 	struct gpio_dt_spec gpio_int;
+	uint16_t chip_id;
 	const struct device *phy_dev;
 	struct spi_dt_spec spi;
 };
@@ -337,6 +341,7 @@ static inline int eth_dm9051_spi_write_regs(const struct device *dev, uint8_t re
 
 static int eth_dm9051_check_id(const struct device *dev)
 {
+	const struct eth_dm9051_config *config = dev->config;
 	uint16_t pid;
 	int ret;
 
@@ -347,12 +352,13 @@ static int eth_dm9051_check_id(const struct device *dev)
 	}
 
 	/* Check product ID */
-	if (sys_le16_to_cpu(pid) != DM9051_ID) {
-		LOG_ERR("%s: Found ID: %04x, Expected ID: %04x\n", dev->name, pid, DM9051_ID);
+	if (sys_le16_to_cpu(pid) != config->chip_id) {
+		LOG_ERR("%s: Found ID: %04x, Expected ID: %04x", dev->name, sys_le16_to_cpu(pid),
+			config->chip_id);
 		return -EIO;
 	}
 
-	LOG_INF("%s: Found ID: %04x\n", dev->name, pid);
+	LOG_INF("%s: Found ID: %04x", dev->name, sys_le16_to_cpu(pid));
 
 	return ret;
 }
@@ -463,6 +469,16 @@ static int eth_dm9051_hw_init(const struct device *dev)
 		return ret;
 	}
 
+	if (config->chip_id == CH390_ID) {
+		/* The CH390 software reset powers the PHY down again */
+		ret = eth_dm9051_spi_write_reg(dev, DM9051_GPR, DM9051_GPR_PHY_ON);
+		if (ret < 0) {
+			return ret;
+		}
+
+		k_msleep(10);
+	}
+
 	/* Enable broadcast packets */
 	ret = eth_dm9051_spi_write_reg(dev, DM9051_MAR + 7, DM9051_MAR_7_BCAST_EN);
 	if (ret < 0) {
@@ -512,6 +528,7 @@ static int eth_dm9051_hw_stop(const struct device *dev, struct net_if *iface __u
 
 static int eth_dm9051_tx(const struct device *dev, struct net_pkt *pkt)
 {
+	const struct eth_dm9051_config *config = dev->config;
 	uint16_t len = (uint16_t)net_pkt_get_len(pkt);
 	struct eth_dm9051_data *data = dev->data;
 	uint16_t len16;
@@ -524,7 +541,15 @@ static int eth_dm9051_tx(const struct device *dev, struct net_pkt *pkt)
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
 
-	ret = eth_dm9051_nsr_poll(dev, DM9051_NSR_POLL_TIMEOUT);
+	/*
+	 * The CH390 leaves NSR TX1END and TX2END clear after reset, so on that
+	 * part wait for TCR.TXREQ of the previous frame to clear instead.
+	 */
+	if (config->chip_id == CH390_ID) {
+		ret = eth_dm9051_tcr_poll(dev);
+	} else {
+		ret = eth_dm9051_nsr_poll(dev, DM9051_NSR_POLL_TIMEOUT);
+	}
 	if (ret < 0) {
 		goto out_spi_unlock;
 	}
@@ -580,8 +605,14 @@ static int eth_dm9051_rx_restart(const struct device *dev)
 	return -EIO;
 }
 
+/*
+ * Read one frame from RX SRAM. Returns 0 with *out set, -EBADMSG or -EMSGSIZE when
+ * the frame was dropped and the next one can still be read, or another negative
+ * errno to end this drain of RX SRAM.
+ */
 static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 {
+	const struct eth_dm9051_config *config = dev->config;
 	struct eth_dm9051_data *data = dev->data;
 	struct eth_dm9051_rxhdr rxhdr;
 	struct net_pkt *pkt;
@@ -599,19 +630,30 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 
 	rx_len = sys_get_le16(rxhdr.len);
 
-	/* Check for RX errors */
-	if ((rxhdr.status & ~DM9051_RSR_MF) > 0 ||
-	    !IN_RANGE(rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE)) {
-		if ((rxhdr.status & ~DM9051_RSR_MF) > 0) {
-			LOG_DBG("%s: RX status error: %02x", dev->name, rxhdr.status);
-		}
-
-		if (!IN_RANGE(rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE)) {
-			LOG_DBG("%s: RX length out of range: %u (min: %u, max: %u)", dev->name,
-				rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE);
-		}
-
+	/* Without a valid length the end of the frame in RX SRAM is unknown */
+	if (!IN_RANGE(rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE)) {
+		LOG_DBG("%s: RX length out of range: %u (min: %u, max: %u), status: %02x",
+			dev->name, rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE,
+			rxhdr.status);
 		goto out_restart;
+	}
+
+	if ((rxhdr.status & ~DM9051_RSR_MF) > 0) {
+		LOG_DBG("%s: RX status error: %02x", dev->name, rxhdr.status);
+
+		/* Skipping by the length needs a header read from a frame boundary */
+		if ((config->chip_id != CH390_ID) || (rxhdr.flag != DM9051_FLAG_RX_PKT)) {
+			goto out_restart;
+		}
+
+		/* The CH390 skips a frame with a status error, such as a FIFO overflow */
+		ret = eth_dm9051_spi_read_mem(dev, DM9051_MRCMD, NULL, rx_len);
+		if (ret < 0) {
+			LOG_ERR("%s: Failed to discard RX data (err %d)", dev->name, ret);
+			goto out_restart;
+		}
+
+		return -EBADMSG;
 	}
 
 	/* Drop a frame larger than the stack accepts */
@@ -693,7 +735,7 @@ out_restart:
 static int eth_dm9051_rx(const struct device *dev)
 {
 	struct eth_dm9051_data *data = dev->data;
-	struct net_pkt *pkt;
+	struct net_pkt *pkt = NULL;
 	uint32_t resets;
 	bool multicast;
 	bool broadcast;
@@ -738,7 +780,7 @@ static int eth_dm9051_rx(const struct device *dev)
 		/* Get received packet */
 		ret = eth_dm9051_recv_pkt(dev, &pkt);
 		frames++;
-		if (ret == -EMSGSIZE) {
+		if ((ret == -EBADMSG) || (ret == -EMSGSIZE)) {
 			/* Frame dropped, keep draining the frames behind it */
 			eth_stats_update_errors_rx(data->iface);
 			continue;
@@ -1289,24 +1331,32 @@ static int eth_dm9051_init(const struct device *dev)
 	return 0;
 }
 
-#define ETH_DM9051_INIT(inst)									\
-	DEVICE_DECLARE(eth_dm9051_phy_##inst);							\
+#define ETH_DM9051_INITIALIZE(inst, name, id)							\
+	DEVICE_DECLARE(name##_phy_##inst);							\
 												\
-	static struct eth_dm9051_data eth_dm9051_data_##inst;					\
+	static struct eth_dm9051_data name##_data_##inst;					\
 												\
-	static const struct eth_dm9051_config eth_dm9051_config_##inst = {			\
+	static const struct eth_dm9051_config name##_config_##inst = {				\
 		.mac_cfg = NET_ETH_MAC_DT_INST_CONFIG_INIT(inst),				\
 		.gpio_int = GPIO_DT_SPEC_INST_GET(inst, int_gpios),				\
-		.phy_dev = DEVICE_GET(eth_dm9051_phy_##inst),					\
+		.chip_id = (id),								\
+		.phy_dev = DEVICE_GET(name##_phy_##inst),					\
 		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_WORD_SET(8)),				\
 	};											\
 												\
-	ETH_NET_DEVICE_DT_INST_DEFINE(inst, eth_dm9051_init, NULL, &eth_dm9051_data_##inst,	\
-				      &eth_dm9051_config_##inst, CONFIG_ETH_INIT_PRIORITY,	\
+	ETH_NET_DEVICE_DT_INST_DEFINE(inst, eth_dm9051_init, NULL, &name##_data_##inst,		\
+				      &name##_config_##inst, CONFIG_ETH_INIT_PRIORITY,		\
 				      &eth_dm9051_api, NET_ETH_MTU);				\
 												\
-	DEVICE_DEFINE(eth_dm9051_phy_##inst, DEVICE_DT_NAME(DT_DRV_INST(inst)) "_phy",		\
-		      NULL, NULL, &eth_dm9051_data_##inst, &eth_dm9051_config_##inst,		\
+	DEVICE_DEFINE(name##_phy_##inst, DEVICE_DT_NAME(DT_DRV_INST(inst)) "_phy",		\
+		      NULL, NULL, &name##_data_##inst, &name##_config_##inst,			\
 		      POST_KERNEL, CONFIG_ETH_INIT_PRIORITY, &ethphy_dm9051_api);
 
+#define ETH_DM9051_INIT(inst) ETH_DM9051_INITIALIZE(inst, eth_dm9051, DM9051_ID)
 DT_INST_FOREACH_STATUS_OKAY(ETH_DM9051_INIT)
+
+#undef DT_DRV_COMPAT
+#define DT_DRV_COMPAT wch_ch390
+
+#define ETH_CH390_INIT(inst) ETH_DM9051_INITIALIZE(inst, eth_ch390, CH390_ID)
+DT_INST_FOREACH_STATUS_OKAY(ETH_CH390_INIT)
