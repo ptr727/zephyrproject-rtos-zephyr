@@ -999,6 +999,14 @@ static int eth_dm9051_init(const struct device *dev)
 		return ret;
 	}
 
+	/* Set the INT pin polarity before the RX thread starts checking the line */
+	ret = eth_dm9051_spi_write_reg(dev, DM9051_INTCR,
+				       (config->gpio_int.dt_flags & GPIO_ACTIVE_LOW) > 0 ?
+				       DM9051_INTCR_POL_LOW : DM9051_INTCR_POL_HIGH);
+	if (ret < 0) {
+		return ret;
+	}
+
 	ret = eth_dm9051_set_mac_addr(dev);
 	if (ret < 0) {
 		LOG_WRN("%s: Unable to set MAC address", dev->name);
