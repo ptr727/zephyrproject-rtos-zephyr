@@ -216,6 +216,8 @@ struct eth_dm9051_data {
 	bool rx_pending;
 	/* A restart from the RX thread failed and is retried, set by the RX thread */
 	bool restart_pending;
+	/* Controller resets, counted with spi_lock held */
+	uint32_t resets;
 };
 
 struct eth_dm9051_rxhdr {
@@ -424,7 +426,10 @@ static int eth_dm9051_hw_init(const struct device *dev)
 	const uint8_t rcr = DM9051_RCR_RXEN | DM9051_RCR_ALL |
 			    DM9051_RCR_DIS_CRC | DM9051_RCR_DIS_LONG;
 	const struct eth_dm9051_config *config = dev->config;
+	struct eth_dm9051_data *data = dev->data;
 	int ret;
+
+	data->resets++;
 
 	/*
 	 * GPR bit 0 is Write-Only (WO per DM9051A spec), reading returns
@@ -580,6 +585,7 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 	struct eth_dm9051_data *data = dev->data;
 	struct eth_dm9051_rxhdr rxhdr;
 	struct net_pkt *pkt;
+	uint32_t resets;
 	uint16_t rx_len;
 	int ret;
 
@@ -624,9 +630,30 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 	/* Alloc RX net_pkt and subtract 4 from RX length to discard CRC */
 	pkt = net_pkt_rx_alloc_with_buffer(data->iface,
 					   rx_len - ETH_DM9051_CRC_SIZE,
-					   NET_AF_UNSPEC, 0,
-					   K_MSEC(CONFIG_ETH_DM9051_TIMEOUT));
-	if (!pkt) {
+					   NET_AF_UNSPEC, 0, K_NO_WAIT);
+	if (pkt == NULL) {
+		/*
+		 * Wait for a buffer without spi_lock: freeing one can take a
+		 * transmit, which needs the lock. The read pointer stays in this
+		 * frame unless a controller reset in the meantime cleared RX SRAM.
+		 */
+		resets = data->resets;
+		k_mutex_unlock(&data->spi_lock);
+		pkt = net_pkt_rx_alloc_with_buffer(data->iface,
+						   rx_len - ETH_DM9051_CRC_SIZE,
+						   NET_AF_UNSPEC, 0,
+						   K_MSEC(CONFIG_ETH_DM9051_TIMEOUT));
+		k_mutex_lock(&data->spi_lock, K_FOREVER);
+
+		if (data->resets != resets) {
+			if (pkt != NULL) {
+				net_pkt_unref(pkt);
+			}
+			return -ECANCELED;
+		}
+	}
+
+	if (pkt == NULL) {
 		/* Discard received data */
 		ret = eth_dm9051_spi_read_mem(dev, DM9051_MRCMD, NULL, rx_len);
 		if (ret < 0) {
