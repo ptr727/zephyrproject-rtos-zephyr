@@ -70,6 +70,8 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_PIDL			0x2A
 /* INTCR - INT Pin Control Register */
 #define DM9051_INTCR			0x39
+/* RLENCR - RX Packet Length Control Register (CH390) */
+#define CH390_RLENCR			0x52
 /* MRCMDX - Memory Data Pre-Fetch Read Command Without Address Increment Register */
 #define DM9051_MRCMDX			0x70
 /* MRCMD - Memory Data Read Command With Address Increment Register */
@@ -144,6 +146,16 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 /* 0x39 */
 #define DM9051_INTCR_POL_HIGH		0x00
 #define DM9051_INTCR_POL_LOW		0x01
+
+/* 0x52 */
+/* RXLEN_EN - Discard RX frames longer than RXLEN */
+#define CH390_RLENCR_RXLEN_EN		BIT(7)
+/* RXLEN - Maximum RX frame length in units of 64 bytes */
+#define CH390_RLENCR_RXLEN_UNIT		64U
+/* RXLEN covering ETH_DM9051_MAX_FRAME_SIZE */
+#define CH390_RLENCR_RXLEN		(ETH_DM9051_MAX_FRAME_SIZE / CH390_RLENCR_RXLEN_UNIT)
+/* Largest frame the CH390 stores with RLENCR set: RXLEN * 64 + 1 bytes */
+#define CH390_MAX_FRAME_SIZE		((CH390_RLENCR_RXLEN * CH390_RLENCR_RXLEN_UNIT) + 1U)
 
 /* 0x7E */
 /* LNKCHG - Link Status Change */
@@ -431,6 +443,7 @@ static int eth_dm9051_hw_init(const struct device *dev)
 	const uint8_t imr = DM9051_IMR_PRI | DM9051_IMR_LNKCHGI | DM9051_IMR_PAR;
 	const uint8_t rcr = DM9051_RCR_RXEN | DM9051_RCR_ALL |
 			    DM9051_RCR_DIS_CRC | DM9051_RCR_DIS_LONG;
+	const uint8_t rlencr = CH390_RLENCR_RXLEN_EN | CH390_RLENCR_RXLEN;
 	const struct eth_dm9051_config *config = dev->config;
 	struct eth_dm9051_data *data = dev->data;
 	int ret;
@@ -477,6 +490,15 @@ static int eth_dm9051_hw_init(const struct device *dev)
 		}
 
 		k_msleep(10);
+
+		/*
+		 * RCR.DIS_LONG does not apply to the CH390: have it discard frames
+		 * longer than the RX path trusts, so they never reach RX SRAM.
+		 */
+		ret = eth_dm9051_spi_write_reg(dev, CH390_RLENCR, rlencr);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	/* Enable broadcast packets */
@@ -614,6 +636,8 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 {
 	const struct eth_dm9051_config *config = dev->config;
 	struct eth_dm9051_data *data = dev->data;
+	const uint16_t max_len = (config->chip_id == CH390_ID) ? CH390_MAX_FRAME_SIZE :
+				 ETH_DM9051_MAX_FRAME_SIZE;
 	struct eth_dm9051_rxhdr rxhdr;
 	struct net_pkt *pkt;
 	uint32_t resets;
@@ -631,10 +655,9 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 	rx_len = sys_get_le16(rxhdr.len);
 
 	/* Without a valid length the end of the frame in RX SRAM is unknown */
-	if (!IN_RANGE(rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE)) {
+	if (!IN_RANGE(rx_len, ETH_DM9051_MIN_FRAME_SIZE, max_len)) {
 		LOG_DBG("%s: RX length out of range: %u (min: %u, max: %u), status: %02x",
-			dev->name, rx_len, ETH_DM9051_MIN_FRAME_SIZE, ETH_DM9051_MAX_FRAME_SIZE,
-			rxhdr.status);
+			dev->name, rx_len, ETH_DM9051_MIN_FRAME_SIZE, max_len, rxhdr.status);
 		goto out_restart;
 	}
 
