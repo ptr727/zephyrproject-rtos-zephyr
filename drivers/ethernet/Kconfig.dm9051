@@ -4,12 +4,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 menuconfig ETH_DM9051
-	bool "Davicom DM9051 Ethernet Controller"
+	bool "Davicom DM9051 and WCH CH390 Ethernet Controller"
 	default y
-	depends on DT_HAS_DAVICOM_DM9051_ENABLED
+	depends on DT_HAS_DAVICOM_DM9051_ENABLED || DT_HAS_WCH_CH390_ENABLED
 	select SPI
 	help
-	  Davicom DM9051 Ethernet Controller with SPI Interface
+	  Davicom DM9051 Ethernet Controller with SPI Interface, and the
+	  register-compatible WCH CH390.
 
 config ETH_DM9051_RX_THREAD_STACK_SIZE
 	int "Stack size for internal incoming packet handler"
