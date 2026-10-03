@@ -1247,8 +1247,12 @@ static int eth_dm9051_set_mac_addr(const struct device *dev)
 	ret = net_eth_mac_load(&config->mac_cfg, data->mac_addr);
 	if (ret == 0) {
 		/* Write the MAC address into device */
-		return eth_dm9051_spi_write_regs(dev, DM9051_PAR, data->mac_addr,
-						 sizeof(data->mac_addr));
+		ret = eth_dm9051_spi_write_regs(dev, DM9051_PAR, data->mac_addr,
+						sizeof(data->mac_addr));
+		if (ret < 0) {
+			LOG_ERR("%s: Failed to write MAC address (err %d)", dev->name, ret);
+		}
+		return ret;
 	}
 
 	/* Fall back to PAR only when no address is configured */
@@ -1260,6 +1264,7 @@ static int eth_dm9051_set_mac_addr(const struct device *dev)
 	/* Read the MAC address from DM9051_PAR registers */
 	ret = eth_dm9051_spi_read_regs(dev, DM9051_PAR, data->mac_addr, sizeof(data->mac_addr));
 	if (ret < 0) {
+		LOG_ERR("%s: Failed to read MAC address from PAR (err %d)", dev->name, ret);
 		return ret;
 	}
 
