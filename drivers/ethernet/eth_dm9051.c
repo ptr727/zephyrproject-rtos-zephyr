@@ -178,10 +178,12 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_NSR_POLL_TIMEOUT		K_USEC(20)
 /* Delay between NSR status polls */
 #define DM9051_NSR_POLL_INTERVAL	K_USEC(1)
-/* Max time to wait for a TX request to complete, in microseconds */
-#define DM9051_TCR_POLL_TIMEOUT_US	2000U
-/* Delay between TCR status polls, in microseconds */
+/* Busy wait for a TX request to complete, in microseconds */
+#define DM9051_TCR_POLL_BUSY_US		2000U
+/* Delay between busy TCR status polls, in microseconds */
 #define DM9051_TCR_POLL_INTERVAL_US	10U
+/* Max time to wait for a TX request to complete */
+#define DM9051_TCR_POLL_TIMEOUT		K_MSEC(10)
 /* Max time the RX thread waits for an INT edge before checking the line */
 #define DM9051_INT_POLL_PERIOD		K_SECONDS(1)
 /* Consecutive ISR services that read no frame before the RX thread waits */
@@ -407,18 +409,22 @@ static bool eth_dm9051_tcr_poll_done(const struct device *dev, int *ret)
 /* Wait for TCR.TXREQ to clear. Called with spi_lock held. */
 static int eth_dm9051_tcr_poll(const struct device *dev)
 {
+	k_timepoint_t end = sys_timepoint_calc(DM9051_TCR_POLL_TIMEOUT);
 	int ret = 0;
 
-	/* Busy wait: a full frame takes about 1.2 ms to send at 10 Mbit/s */
-	if (WAIT_FOR(eth_dm9051_tcr_poll_done(dev, &ret), DM9051_TCR_POLL_TIMEOUT_US,
+	/* Busy wait first: a full frame takes about 1.2 ms to send at 10 Mbit/s */
+	if (WAIT_FOR(eth_dm9051_tcr_poll_done(dev, &ret), DM9051_TCR_POLL_BUSY_US,
 		     k_busy_wait(DM9051_TCR_POLL_INTERVAL_US))) {
 		return ret;
 	}
 
-	/* Read once more in case the deadline passed while this thread was preempted */
-	if (eth_dm9051_tcr_poll_done(dev, &ret)) {
-		return ret;
-	}
+	/* Deferral and collisions on a half duplex link take longer: sleep between polls */
+	do {
+		k_sleep(K_TICKS(1));
+		if (eth_dm9051_tcr_poll_done(dev, &ret)) {
+			return ret;
+		}
+	} while (!sys_timepoint_expired(end));
 
 	return -ETIMEDOUT;
 }
@@ -538,6 +544,13 @@ static int eth_dm9051_tx(const struct device *dev, struct net_pkt *pkt)
 	}
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
+
+	/* A request that timed out before may still be pending: do not overwrite it */
+	ret = eth_dm9051_tcr_poll(dev);
+	if (ret < 0) {
+		ret = -EIO;
+		goto out_spi_unlock;
+	}
 
 	ret = eth_dm9051_nsr_poll(dev, DM9051_NSR_POLL_TIMEOUT);
 	if (ret < 0) {
