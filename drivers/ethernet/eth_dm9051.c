@@ -192,8 +192,8 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_ISR_IDLE_BACKOFF		K_MSEC(1)
 /* Frames read per RX drain before spi_lock is released to other users */
 #define DM9051_RX_DRAIN_MAX		16
-/* Longest time in ms the RX thread runs without blocking before it sleeps */
-#define DM9051_RX_BUSY_MAX_MS		10
+/* Longest time in ticks the RX thread runs without blocking before it sleeps a tick */
+#define DM9051_RX_BUSY_MAX_TICKS	10
 
 struct eth_dm9051_config {
 	struct net_eth_mac_config mac_cfg;
@@ -919,7 +919,7 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 
 	const struct eth_dm9051_config *config;
 	struct eth_dm9051_data *data;
-	int64_t busy_since = k_uptime_get();
+	int64_t busy_since = k_uptime_ticks();
 	k_timeout_t timeout;
 	uint8_t idle = 0U;
 	struct device *dev;
@@ -959,7 +959,7 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 			blocks = (k_sem_count_get(&data->int_event) == 0U);
 			ret = k_sem_take(&data->int_event, timeout);
 			if (blocks) {
-				busy_since = k_uptime_get();
+				busy_since = k_uptime_ticks();
 			}
 			/* A failed line read services ISR rather than waiting again */
 			if ((ret != 0) && (gpio_pin_get_dt(&config->gpio_int) == 0)) {
@@ -1009,9 +1009,9 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 		 * reads them, it would never block, and no lower priority thread,
 		 * such as the one sending replies, would run.
 		 */
-		if ((k_uptime_get() - busy_since) >= DM9051_RX_BUSY_MAX_MS) {
-			k_msleep(1);
-			busy_since = k_uptime_get();
+		if ((k_uptime_ticks() - busy_since) >= DM9051_RX_BUSY_MAX_TICKS) {
+			k_sleep(K_TICKS(1));
+			busy_since = k_uptime_ticks();
 		}
 	}
 }
