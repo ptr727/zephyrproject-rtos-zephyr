@@ -1285,7 +1285,8 @@ static int eth_dm9051_init(const struct device *dev)
 
 	data->dev = dev;
 
-	k_sem_init(&data->int_event, 0, UINT_MAX);
+	/* Every wakeup reads ISR, so one pending wakeup stands for any number */
+	k_sem_init(&data->int_event, 0, 1);
 	k_mutex_init(&data->spi_lock);
 
 	if (!spi_is_ready_dt(&config->spi)) {
