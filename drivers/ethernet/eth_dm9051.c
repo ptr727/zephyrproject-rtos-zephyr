@@ -1222,9 +1222,10 @@ static int eth_dm9051_set_mac_addr(const struct device *dev)
 						 sizeof(data->mac_addr));
 	}
 
-	/* -ENODATA means no address is configured, anything else is a failure */
+	/* Fall back to PAR only when no address is configured */
 	if (ret != -ENODATA) {
-		LOG_ERR("%s: Failed to load MAC address (err %d), using PAR", dev->name, ret);
+		LOG_ERR("%s: Failed to load MAC address (err %d)", dev->name, ret);
+		return ret;
 	}
 
 	/* Read the MAC address from DM9051_PAR registers */
@@ -1302,7 +1303,12 @@ static int eth_dm9051_init(const struct device *dev)
 	}
 
 	ret = eth_dm9051_set_mac_addr(dev);
-	if (ret < 0) {
+	if ((ret < 0) && (ret != -EINVAL)) {
+		return ret;
+	}
+
+	if (ret == -EINVAL) {
+		/* PAR holds no valid unicast address */
 		LOG_WRN("%s: Unable to set MAC address", dev->name);
 	}
 
