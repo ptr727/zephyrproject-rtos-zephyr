@@ -1059,14 +1059,18 @@ static int eth_dm9051_set_config(const struct device *dev,
 			break;
 		}
 
-		ret = eth_dm9051_spi_read_reg(dev, DM9051_RCR, &rcr);
-		if (ret < 0) {
+		/*
+		 * Compare with the recorded mode, not RCR: stopping the interface or
+		 * a failed restart clears RCR, and RCR would then report a change
+		 * the stack still has to make as already done.
+		 */
+		if (config->promisc_mode == data->promisc) {
+			ret = -EALREADY;
 			break;
 		}
 
-		if (config->promisc_mode == ((rcr & DM9051_RCR_PRMSC) > 0)) {
-			data->promisc = config->promisc_mode;
-			ret = -EALREADY;
+		ret = eth_dm9051_spi_read_reg(dev, DM9051_RCR, &rcr);
+		if (ret < 0) {
 			break;
 		}
 
