@@ -504,15 +504,20 @@ static int eth_dm9051_hw_stop(const struct device *dev, struct net_if *iface __u
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
 
-	/* A restart would enable RX and the PHY again: none until the next start */
-	data->started = false;
-	data->restart_pending = false;
-
 	/* Power off the internal phy */
 	ret = eth_dm9051_spi_write_reg(dev, DM9051_GPR, DM9051_GPR_PHY_OFF);
 	if (ret == 0) {
 		/* Disable RX */
 		ret = eth_dm9051_spi_write_reg(dev, DM9051_RCR, 0);
+	}
+
+	if (ret == 0) {
+		/*
+		 * A restart would enable RX and the PHY again: none until the next
+		 * start. After a failed stop the interface stays up and keeps them.
+		 */
+		data->started = false;
+		data->restart_pending = false;
 	}
 
 	k_mutex_unlock(&data->spi_lock);
@@ -917,7 +922,10 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 	while (true) {
 		if (data->restart_pending) {
 			k_mutex_lock(&data->spi_lock, K_FOREVER);
-			(void)eth_dm9051_rx_restart(dev);
+			/* Start and stop clear it under the lock, possibly in between */
+			if (data->restart_pending) {
+				(void)eth_dm9051_rx_restart(dev);
+			}
 			k_mutex_unlock(&data->spi_lock);
 		}
 
