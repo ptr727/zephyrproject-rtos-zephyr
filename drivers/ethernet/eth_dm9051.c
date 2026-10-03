@@ -214,12 +214,14 @@ struct eth_dm9051_data {
 	uint8_t mac_addr[6];
 	/* RX SRAM may hold frames although ISR.PR is clear, set by the RX thread */
 	bool rx_pending;
-	/* A restart from the RX thread failed and is retried, set by the RX thread */
+	/* A restart from the RX thread failed and is retried, under spi_lock */
 	bool restart_pending;
 	/* Controller resets, counted with spi_lock held */
 	uint32_t resets;
 	/* Promiscuous mode set through set_config, kept across resets, under spi_lock */
 	bool promisc;
+	/* Started by the start call and not stopped since, under spi_lock */
+	bool started;
 };
 
 struct eth_dm9051_rxhdr {
@@ -488,6 +490,8 @@ static int eth_dm9051_hw_start(const struct device *dev, struct net_if *iface __
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
 	ret = eth_dm9051_hw_init(dev);
+	data->started = (ret == 0);
+	data->restart_pending = false;
 	k_mutex_unlock(&data->spi_lock);
 
 	return ret;
@@ -499,6 +503,10 @@ static int eth_dm9051_hw_stop(const struct device *dev, struct net_if *iface __u
 	int ret;
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
+
+	/* A restart would enable RX and the PHY again: none until the next start */
+	data->started = false;
+	data->restart_pending = false;
 
 	/* Power off the internal phy */
 	ret = eth_dm9051_spi_write_reg(dev, DM9051_GPR, DM9051_GPR_PHY_OFF);
@@ -569,6 +577,11 @@ static int eth_dm9051_rx_restart(const struct device *dev)
 {
 	struct eth_dm9051_data *data = dev->data;
 	int ret;
+
+	if (!data->started) {
+		/* Stopped: RX is off, and the next start resets the controller */
+		return -EIO;
+	}
 
 	ret = eth_dm9051_hw_init(dev);
 	if (ret < 0) {
