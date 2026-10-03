@@ -440,11 +440,12 @@ static int eth_dm9051_tcr_poll(const struct device *dev)
 /* Reset and configure the controller. Called with spi_lock held. */
 static int eth_dm9051_hw_init(const struct device *dev)
 {
-	const uint8_t imr = DM9051_IMR_PRI | DM9051_IMR_LNKCHGI | DM9051_IMR_PAR;
-	const uint8_t rcr = DM9051_RCR_RXEN | DM9051_RCR_ALL |
-			    DM9051_RCR_DIS_CRC | DM9051_RCR_DIS_LONG;
-	const uint8_t rlencr = CH390_RLENCR_RXLEN_EN | CH390_RLENCR_RXLEN;
 	const struct eth_dm9051_config *config = dev->config;
+	const uint8_t imr = DM9051_IMR_PRI | DM9051_IMR_LNKCHGI | DM9051_IMR_PAR;
+	/* RCR bit 5 is reserved on the CH390, which discards long frames by RLENCR */
+	const uint8_t rcr = DM9051_RCR_RXEN | DM9051_RCR_ALL | DM9051_RCR_DIS_CRC |
+			    ((config->chip_id == CH390_ID) ? 0U : DM9051_RCR_DIS_LONG);
+	const uint8_t rlencr = CH390_RLENCR_RXLEN_EN | CH390_RLENCR_RXLEN;
 	struct eth_dm9051_data *data = dev->data;
 	int ret;
 
