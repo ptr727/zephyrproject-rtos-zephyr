@@ -184,7 +184,7 @@ LOG_MODULE_REGISTER(eth_dm9051, CONFIG_ETHERNET_LOG_LEVEL);
 #define DM9051_TCR_POLL_INTERVAL_US	10U
 /* Max time the RX thread waits for an INT edge before checking the line */
 #define DM9051_INT_POLL_PERIOD		K_SECONDS(1)
-/* Consecutive ISR services that find no work before the RX thread waits */
+/* Consecutive ISR services that read no frame before the RX thread waits */
 #define DM9051_ISR_IDLE_MAX		8U
 /* Wait after DM9051_ISR_IDLE_MAX idle ISR services */
 #define DM9051_ISR_IDLE_BACKOFF		K_MSEC(1)
@@ -953,7 +953,11 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		progress = (isr & DM9051_ISR_LNKCHG) > 0;
+		/*
+		 * Only a frame read counts as work: a link change bit that write-back
+		 * does not clear would otherwise reset the count on every service.
+		 */
+		progress = false;
 
 		if (((isr & DM9051_ISR_PR) > 0) || data->rx_pending) {
 			data->rx_pending = false;
