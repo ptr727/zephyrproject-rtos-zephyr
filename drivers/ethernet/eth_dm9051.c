@@ -785,6 +785,10 @@ static int eth_dm9051_rx(const struct device *dev)
 			data->rx_pending = true;
 			k_sem_give(&data->int_event);
 		}
+		if (ret == -ECANCELED) {
+			/* A controller reset during the buffer wait cleared RX SRAM */
+			break;
+		}
 		if (ret < 0) {
 			goto out_update_errors_rx;
 		}
