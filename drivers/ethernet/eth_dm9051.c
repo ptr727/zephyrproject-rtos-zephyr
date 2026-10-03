@@ -936,14 +936,12 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 	data = dev->data;
 
 	while (true) {
+		/* Start, stop and restart set or clear it, all under spi_lock */
+		k_mutex_lock(&data->spi_lock, K_FOREVER);
 		if (data->restart_pending) {
-			k_mutex_lock(&data->spi_lock, K_FOREVER);
-			/* Start and stop clear it under the lock, possibly in between */
-			if (data->restart_pending) {
-				(void)eth_dm9051_rx_restart(dev);
-			}
-			k_mutex_unlock(&data->spi_lock);
+			(void)eth_dm9051_rx_restart(dev);
 		}
+		k_mutex_unlock(&data->spi_lock);
 
 		/*
 		 * The interrupt is edge triggered but the line follows ISR, so an
