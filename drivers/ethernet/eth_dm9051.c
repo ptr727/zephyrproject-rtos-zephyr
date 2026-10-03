@@ -925,7 +925,6 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 	struct device *dev;
 	uint8_t isr = 0;
 	bool progress;
-	bool blocks;
 	int ret;
 
 	dev = p1;
@@ -956,9 +955,10 @@ static void eth_dm9051_rx_thread(void *p1, void *p2, void *p3)
 			timeout = (idle >= DM9051_ISR_IDLE_MAX) ? DM9051_ISR_IDLE_BACKOFF :
 								  DM9051_INT_POLL_PERIOD;
 			idle = 0U;
-			blocks = (k_sem_count_get(&data->int_event) == 0U);
-			ret = k_sem_take(&data->int_event, timeout);
-			if (blocks) {
+			/* Only a wait that blocks ends a run of busy time */
+			ret = k_sem_take(&data->int_event, K_NO_WAIT);
+			if (ret != 0) {
+				ret = k_sem_take(&data->int_event, timeout);
 				busy_since = k_uptime_ticks();
 			}
 			/* A failed line read services ISR rather than waiting again */
