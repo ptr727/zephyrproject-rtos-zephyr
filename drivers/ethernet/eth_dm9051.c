@@ -595,7 +595,7 @@ out_restart:
 static int eth_dm9051_rx(const struct device *dev)
 {
 	struct eth_dm9051_data *data = dev->data;
-	struct net_pkt *pkt;
+	struct net_pkt *pkt = NULL;
 	int frames = 0;
 	uint16_t flag;
 	int ret;
