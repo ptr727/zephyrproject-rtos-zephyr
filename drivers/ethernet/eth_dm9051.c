@@ -666,9 +666,11 @@ static int eth_dm9051_recv_pkt(const struct device *dev, struct net_pkt **out)
 					   NET_AF_UNSPEC, 0, K_NO_WAIT);
 	if (pkt == NULL) {
 		/*
-		 * Wait for a buffer without spi_lock: freeing one can take a
-		 * transmit, which needs the lock. The read pointer stays in this
-		 * frame unless a controller reset in the meantime cleared RX SRAM.
+		 * Wait for a buffer without spi_lock: RX buffers are freed as the
+		 * stack finishes with received packets, which often means sending
+		 * a reply first, and the transmit needs the lock. The read pointer
+		 * stays in this frame unless a controller reset in the meantime
+		 * cleared RX SRAM.
 		 */
 		resets = data->resets;
 		k_mutex_unlock(&data->spi_lock);
