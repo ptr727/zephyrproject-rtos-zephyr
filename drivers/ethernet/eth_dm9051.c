@@ -726,7 +726,7 @@ out_restart:
 static int eth_dm9051_rx(const struct device *dev)
 {
 	struct eth_dm9051_data *data = dev->data;
-	struct net_pkt *pkt;
+	struct net_pkt *pkt = NULL;
 	uint32_t resets;
 	bool multicast;
 	bool broadcast;
