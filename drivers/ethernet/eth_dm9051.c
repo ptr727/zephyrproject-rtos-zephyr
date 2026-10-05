@@ -730,12 +730,9 @@ static int eth_dm9051_rx(const struct device *dev)
 	struct eth_dm9051_data *data = dev->data;
 	struct net_pkt *pkt = NULL;
 	uint32_t resets;
-	bool multicast;
-	bool broadcast;
 	int frames = 0;
 	uint16_t flag;
 	uint8_t ready;
-	size_t len;
 	int ret;
 
 	k_mutex_lock(&data->spi_lock, K_FOREVER);
@@ -795,16 +792,12 @@ static int eth_dm9051_rx(const struct device *dev)
 			goto out_update_errors_rx;
 		}
 
-		/* The stack can free the packet before net_recv_data() returns */
-		len = net_pkt_get_len(pkt);
-		broadcast = net_eth_is_addr_broadcast(&NET_ETH_HDR(pkt)->dst);
-		multicast = net_eth_is_addr_multicast(&NET_ETH_HDR(pkt)->dst);
-
 		/*
 		 * Push the net_pkt in the network stack without spi_lock: with
 		 * NET_TC_RX_COUNT=0 the stack processes it here, and a reply then
 		 * takes its locks and spi_lock in turn. The read pointer stays at
 		 * the next frame unless a controller reset meanwhile cleared RX SRAM.
+		 * The Ethernet L2 counts the frame in its RX statistics.
 		 */
 		resets = data->resets;
 		k_mutex_unlock(&data->spi_lock);
@@ -815,17 +808,6 @@ static int eth_dm9051_rx(const struct device *dev)
 			LOG_DBG("%s: RX packet not accepted (err %d)", dev->name, ret);
 			net_pkt_unref(pkt);
 			eth_stats_update_errors_rx(data->iface);
-		} else {
-			/* Update ethernet statistics */
-			eth_stats_update_bytes_rx(data->iface, len);
-			eth_stats_update_pkts_rx(data->iface);
-			if (broadcast) {
-				eth_stats_update_broadcast_rx(data->iface);
-			} else if (multicast) {
-				eth_stats_update_multicast_rx(data->iface);
-			} else {
-				/* Unicast frame */
-			}
 		}
 
 		if (data->resets != resets) {
