@@ -475,7 +475,8 @@ int mfd_rv3028_write_reg8(const struct device *dev, uint8_t addr, uint8_t val);
  *
  * Performs a read-modify-write operation on the register at @p addr.
  * Only the bits specified by @p mask are updated with the corresponding
- * bits from @p val. All other bits remain unchanged.
+ * bits from @p val. All other bits remain unchanged. Clears BSF, and
+ * writes nothing if a backup switchover occurs during the read.
  *
  * @param dev Pointer to the RV3028 MFD device.
  * @param addr Register address to update.
@@ -483,6 +484,7 @@ int mfd_rv3028_write_reg8(const struct device *dev, uint8_t addr, uint8_t val);
  * @param val New value for the bits specified by @p mask.
  *
  * @retval 0 If successful.
+ * @retval -EIO Backup switchover during the read, or a Control 2 value with RESET set.
  * @retval Negative errno code on failure.
  */
 int mfd_rv3028_update_reg8(const struct device *dev, uint8_t addr, uint8_t mask, uint8_t val);
