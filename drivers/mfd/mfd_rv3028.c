@@ -259,19 +259,59 @@ int mfd_rv3028_write_reg8(const struct device *dev, uint8_t addr, uint8_t val)
 	return mfd_rv3028_write_regs(dev, addr, &val, sizeof(val));
 }
 
+/*
+ * A switchover to VBACKUP disables and resets the I2C interface, and the rest of a read it
+ * cuts short returns 1s without an error. Written back, such a value sets every other bit of
+ * the register, 12_24 in Control 2 among them. Clear a BSF left by an earlier switchover, and
+ * write only if BSF is still clear after the read.
+ */
 int mfd_rv3028_update_reg8(const struct device *dev, uint8_t addr, uint8_t mask, uint8_t val)
 {
-	const struct mfd_rv3028_config *config = dev->config;
+	uint8_t status;
+	uint8_t old_val;
+	uint8_t new_val;
 	int err;
 
-	err = i2c_reg_update_byte_dt(&config->i2c, addr, mask, val);
-	if (err) {
-		LOG_ERR("failed to update reg addr 0x%02x, mask 0x%02x, val 0x%02x (err %d)", addr,
-			mask, val, err);
+	err = mfd_rv3028_read_reg8(dev, RV3028_REG_STATUS, &status);
+	if (err != 0) {
 		return err;
 	}
 
-	return 0;
+	if ((status & RV3028_STATUS_BSF) != 0U) {
+		/* Writing 1 to the other flags leaves them unchanged */
+		err = mfd_rv3028_write_reg8(dev, RV3028_REG_STATUS, (uint8_t)~RV3028_STATUS_BSF);
+		if (err != 0) {
+			return err;
+		}
+	}
+
+	err = mfd_rv3028_read_reg8(dev, addr, &old_val);
+	if (err != 0) {
+		return err;
+	}
+
+	err = mfd_rv3028_read_reg8(dev, RV3028_REG_STATUS, &status);
+	if (err != 0) {
+		return err;
+	}
+
+	if ((status & RV3028_STATUS_BSF) != 0U) {
+		LOG_WRN("backup switchover during read of reg addr 0x%02x", addr);
+		return -EIO;
+	}
+
+	/* RESET always reads 0 */
+	if ((addr == RV3028_REG_CONTROL2) && ((old_val & RV3028_CONTROL2_RESET) != 0U)) {
+		LOG_WRN("invalid Control 2 read: 0x%02x", old_val);
+		return -EIO;
+	}
+
+	new_val = (old_val & ~mask) | (val & mask);
+	if (new_val == old_val) {
+		return 0;
+	}
+
+	return mfd_rv3028_write_reg8(dev, addr, new_val);
 }
 
 static int mfd_rv3028_eeprom_wait_busy(const struct device *dev, int poll_ms)
@@ -339,8 +379,15 @@ int mfd_rv3028_eeprom_end(const struct device *dev)
 	int err;
 	int err_eerd;
 
-	/* Enable switchover again only once the EEPROM is idle */
 	err = mfd_rv3028_eeprom_wait_busy(dev, RV3028_EEBUSY_WRITE_POLL_MS);
+
+	/*
+	 * Clear EERD in any case, so the daily refresh restores RAM from EEPROM. Clear it while
+	 * switchover is still disabled, so that no switchover cuts the read of Control 1 short.
+	 */
+	err_eerd = mfd_rv3028_exit_eerd(dev);
+
+	/* Enable switchover again only once the EEPROM is idle */
 	if (err == 0) {
 		err = mfd_rv3028_update_reg8(dev, RV3028_REG_BACKUP, RV3028_BACKUP_BSM,
 					     config->backup);
@@ -349,9 +396,6 @@ int mfd_rv3028_eeprom_end(const struct device *dev)
 	if (err != 0) {
 		LOG_ERR("backup switchover not restored (err %d)", err);
 	}
-
-	/* Clear EERD in any case, so the daily refresh restores RAM from EEPROM */
-	err_eerd = mfd_rv3028_exit_eerd(dev);
 
 	return (err != 0) ? err : err_eerd;
 }
